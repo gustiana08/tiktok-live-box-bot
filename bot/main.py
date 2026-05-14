@@ -135,15 +135,20 @@ class Bot:
             if stream.username not in self.multi_detector.monitored_usernames:
                 new_streams.append(stream.username)
 
-        # Add new streams to detector
+        # Add new streams to detector (with delay to avoid rate limits)
         added = 0
         for username in new_streams:
             if self.multi_detector.active_count >= settings.max_concurrent_streams:
-                logger.info("Max concurrent streams reached (%d). Skipping.", settings.max_concurrent_streams)
+                logger.info(
+                    "Max concurrent streams reached (%d). Skipping.",
+                    settings.max_concurrent_streams,
+                )
                 break
             success = await self.multi_detector.add_stream(username)
             if success:
                 added += 1
+                # Rate limit: wait between connections
+                await asyncio.sleep(3)
 
         if added > 0:
             logger.info(
