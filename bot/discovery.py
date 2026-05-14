@@ -193,7 +193,7 @@ class LiveDiscovery:
         return unique
 
     async def _discover_via_playwright(self) -> list[LiveStreamInfo]:
-        """Use Playwright to discover live streams by connecting to the running Chrome via CDP."""
+        """Use Playwright to discover live streams from multiple regions."""
         results: list[LiveStreamInfo] = []
 
         try:
@@ -202,52 +202,59 @@ class LiveDiscovery:
             logger.debug("Playwright not installed, skipping browser-based discovery.")
             return results
 
+        # Scan multiple pages: global + Indonesian locale
+        pages_to_scan = [
+            f"{TIKTOK_BASE}/live",
+            f"{TIKTOK_BASE}/live?lang=id-ID",
+        ]
+
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.connect_over_cdp("http://localhost:29229")
                 context = browser.contexts[0] if browser.contexts else await browser.new_context()
-                page = await context.new_page()
 
-                # Navigate to TikTok's live discover page
-                await page.goto(f"{TIKTOK_BASE}/live", wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_timeout(5000)
-
-                # Scroll down to load more content (Gaming section, categories, etc.)
-                for _ in range(5):
-                    await page.evaluate("window.scrollBy(0, 800)")
-                    await page.wait_for_timeout(1000)
-
-                # Extract all live stream links from rendered HTML
-                content = await page.content()
-                username_pattern = re.compile(r"/@([\w.]+)/live")
-                found_usernames = set(username_pattern.findall(content))
-
-                # Also extract from JSON data in scripts
-                scripts = await page.query_selector_all("script")
-                for script in scripts:
+                for page_url in pages_to_scan:
+                    page = await context.new_page()
                     try:
-                        text = await script.inner_text()
-                    except Exception:
-                        continue
-                    if "uniqueId" in text or "roomId" in text:
-                        json_usernames = re.findall(r'"uniqueId"\s*:\s*"([\w.]+)"', text)
-                        found_usernames.update(json_usernames)
-                        room_ids = re.findall(r'"roomId"\s*:\s*"(\d+)"', text)
-                        for uid, rid in zip(json_usernames, room_ids, strict=False):
-                            results.append(
-                                LiveStreamInfo(
-                                    username=uid,
-                                    room_id=rid,
-                                    source="playwright_json",
-                                )
-                            )
+                        await page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
+                        await page.wait_for_timeout(5000)
 
-                existing = {r.username for r in results}
-                for uname in found_usernames:
-                    if uname not in existing:
-                        results.append(LiveStreamInfo(username=uname, source="playwright_link"))
+                        for _ in range(5):
+                            await page.evaluate("window.scrollBy(0, 800)")
+                            await page.wait_for_timeout(1000)
 
-                await page.close()
+                        content = await page.content()
+                        username_pattern = re.compile(r"/@([\w.]+)/live")
+                        found_usernames = set(username_pattern.findall(content))
+
+                        scripts = await page.query_selector_all("script")
+                        for script in scripts:
+                            try:
+                                text = await script.inner_text()
+                            except Exception:
+                                continue
+                            if "uniqueId" in text or "roomId" in text:
+                                json_usernames = re.findall(r'"uniqueId"\s*:\s*"([\w.]+)"', text)
+                                found_usernames.update(json_usernames)
+                                room_ids = re.findall(r'"roomId"\s*:\s*"(\d+)"', text)
+                                for uid, rid in zip(json_usernames, room_ids, strict=False):
+                                    results.append(
+                                        LiveStreamInfo(
+                                            username=uid,
+                                            room_id=rid,
+                                            source="playwright_json",
+                                        )
+                                    )
+
+                        existing = {r.username for r in results}
+                        for uname in found_usernames:
+                            if uname not in existing:
+                                results.append(LiveStreamInfo(username=uname, source="playwright_link"))
+                    except Exception as e:
+                        logger.debug("Playwright page %s error: %s", page_url, e)
+                    finally:
+                        await page.close()
+
                 logger.info("Playwright discovered %d live streams.", len(results))
 
         except Exception as e:

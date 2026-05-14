@@ -11,7 +11,7 @@ from typing import Any
 from bot.config import settings
 from bot.detector import MultiStreamDetector
 from bot.discovery import LiveDiscovery
-from bot.telegram_notifier import notify_bot_status, notify_live_found, notify_lucky_box
+from bot.telegram_notifier import notify_bot_status, notify_lucky_box
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +36,8 @@ async def on_box_detected(username: str, room_id: int | str, box_info: dict[str,
 
 
 async def on_stream_connected(username: str, room_id: int | str, stream_info: dict[str, Any]) -> None:
-    """Callback when successfully connected to a live stream — send info to Telegram."""
+    """Log when connected to a live stream (no Telegram notification)."""
     logger.info("LIVE connected: @%s Room:%s", username, room_id)
-    await notify_live_found(username=username, room_id=room_id, stream_info=stream_info)
 
 
 class Bot:

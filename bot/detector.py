@@ -1,7 +1,14 @@
-"""TikTok Live lucky box (kotak keberuntungan) detector.
+"""TikTok Live lucky box (kotak harta karun) detector.
 
 Connects to individual TikTok Live streams via the TikTokLive library
 and listens for treasure box / envelope events.
+
+Multiple detection strategies:
+1. EnvelopeEvent — official protobuf event for treasure boxes
+2. EnvelopePortalEvent — portal/popup notification for treasure boxes
+3. GoodyBagEvent / CapsuleEvent — alternative reward events
+4. GiftEvent — filter gifts related to treasure/lucky box
+5. Raw event scanning — fallback byte-pattern matching
 """
 
 from __future__ import annotations
@@ -39,7 +46,6 @@ class LuckyBoxDetector:
 
     async def start(self) -> None:
         """Start monitoring the stream for lucky boxes."""
-        # Reset state for fresh start / retry
         self._running = False
         if self._client:
             try:
@@ -52,7 +58,7 @@ class LuckyBoxDetector:
         self._running = True
 
         try:
-            logger.info("Starting lucky box detector for @%s ...", self.username)
+            logger.info("Starting detector for @%s ...", self.username)
             await self._client.start(fetch_room_info=True)
         except Exception as e:
             self._running = False
@@ -86,7 +92,7 @@ class LuckyBoxDetector:
             self._room_id = self._client.room_id if self._client else 0
             self._stream_info = self._extract_stream_info()
             logger.info(
-                "Connected to @%s (Room ID: %s, Region: %s, Viewers: %s)",
+                "Connected to @%s (Room:%s Region:%s Viewers:%s)",
                 event.unique_id,
                 self._room_id,
                 self._stream_info.get("region", "?"),
@@ -100,25 +106,86 @@ class LuckyBoxDetector:
             self._running = False
             logger.info("Disconnected from @%s", self.username)
 
-        # Listen for ALL events and filter for lucky box related ones.
-        # The treasure box / lucky box in TikTok uses WebcastEnvelopeMessage
-        # which maps to EnvelopeEvent in TikTokLive library.
+        self._register_envelope_events()
+        self._register_gift_events()
+        self._register_raw_scanner()
+
+    def _register_envelope_events(self) -> None:
+        """Register envelope/treasure box event listeners."""
+        if not self._client:
+            return
+
+        # 1. EnvelopeEvent — primary treasure box event
         try:
             from TikTokLive.events import EnvelopeEvent
 
             @self._client.on(EnvelopeEvent)
             async def on_envelope(event: EnvelopeEvent) -> None:
-                logger.info("EnvelopeEvent (treasure box) detected in @%s!", self.username)
+                logger.info("🎁 ENVELOPE EVENT in @%s!", self.username)
                 box_info = self._parse_envelope_event(event)
                 box_info["stream_info"] = self._stream_info
                 if self.on_box_detected:
                     await self.on_box_detected(self.username, self._room_id, box_info)
-        except ImportError:
-            logger.warning(
-                "EnvelopeEvent not available in this TikTokLive version. Falling back to raw event scanning."
-            )
 
-        # Also listen for gift events that might be related to lucky boxes
+        except ImportError:
+            logger.debug("EnvelopeEvent not available.")
+
+        # 2. EnvelopePortalEvent — treasure box portal/popup
+        try:
+            from TikTokLive.events import EnvelopePortalEvent
+
+            @self._client.on(EnvelopePortalEvent)
+            async def on_portal(event: EnvelopePortalEvent) -> None:
+                logger.info("🎁 ENVELOPE PORTAL in @%s!", self.username)
+                box_info = {
+                    "type": "envelope_portal",
+                    "stream_info": self._stream_info,
+                }
+                if self.on_box_detected:
+                    await self.on_box_detected(self.username, self._room_id, box_info)
+
+        except ImportError:
+            logger.debug("EnvelopePortalEvent not available.")
+
+        # 3. GoodyBagEvent — alternative reward mechanism
+        try:
+            from TikTokLive.events import GoodyBagEvent
+
+            @self._client.on(GoodyBagEvent)
+            async def on_goody(event: GoodyBagEvent) -> None:
+                logger.info("🎁 GOODY BAG in @%s!", self.username)
+                box_info = {
+                    "type": "goody_bag",
+                    "stream_info": self._stream_info,
+                }
+                if self.on_box_detected:
+                    await self.on_box_detected(self.username, self._room_id, box_info)
+
+        except ImportError:
+            logger.debug("GoodyBagEvent not available.")
+
+        # 4. CapsuleEvent — capsule reward
+        try:
+            from TikTokLive.events import CapsuleEvent
+
+            @self._client.on(CapsuleEvent)
+            async def on_capsule(event: CapsuleEvent) -> None:
+                logger.info("🎁 CAPSULE EVENT in @%s!", self.username)
+                box_info = {
+                    "type": "capsule",
+                    "stream_info": self._stream_info,
+                }
+                if self.on_box_detected:
+                    await self.on_box_detected(self.username, self._room_id, box_info)
+
+        except ImportError:
+            logger.debug("CapsuleEvent not available.")
+
+    def _register_gift_events(self) -> None:
+        """Register gift event listener to detect treasure-box-related gifts."""
+        if not self._client:
+            return
+
         try:
             from TikTokLive.events import GiftEvent
 
@@ -127,7 +194,6 @@ class LuckyBoxDetector:
                 gift_name = ""
                 gift_id = 0
 
-                # Try to extract gift info from the event
                 try:
                     if hasattr(event, "gift"):
                         gift_obj = event.gift
@@ -142,21 +208,22 @@ class LuckyBoxDetector:
                 except Exception:
                     pass
 
-                # Check if this gift is a lucky box / treasure box
                 box_keywords = [
                     "treasure",
                     "lucky",
-                    "box",
                     "chest",
                     "kotak",
                     "keberuntungan",
+                    "harta",
+                    "karun",
                     "envelope",
                     "mystery",
+                    "box",
                 ]
                 name_lower = gift_name.lower()
                 if any(kw in name_lower for kw in box_keywords):
                     logger.info(
-                        "Lucky box gift detected in @%s: %s (ID: %s)",
+                        "🎁 BOX GIFT in @%s: %s (ID:%s)",
                         self.username,
                         gift_name,
                         gift_id,
@@ -169,32 +236,47 @@ class LuckyBoxDetector:
                     }
                     if self.on_box_detected:
                         await self.on_box_detected(self.username, self._room_id, box_info)
-        except ImportError:
-            logger.warning("GiftEvent not available.")
 
-        # Catch-all for unknown/raw events that might contain envelope data
+        except ImportError:
+            logger.debug("GiftEvent not available.")
+
+    def _register_raw_scanner(self) -> None:
+        """Scan raw/unknown events for treasure box byte patterns."""
+        if not self._client:
+            return
+
         try:
             from TikTokLive.events import UnknownEvent
 
             @self._client.on(UnknownEvent)
             async def on_unknown(event: UnknownEvent) -> None:
-                # Check raw bytes for envelope/treasure box signatures
                 raw = event.bytes if hasattr(event, "bytes") and event.bytes else b""
                 if not raw:
                     return
 
-                # Look for protobuf patterns related to envelope/treasure box
-                envelope_markers = [b"envelope", b"treasure", b"lucky_box", b"Envelope"]
-                if any(marker in raw for marker in envelope_markers):
-                    logger.info("Possible lucky box detected via raw event in @%s", self.username)
+                markers = [
+                    b"envelope",
+                    b"Envelope",
+                    b"treasure",
+                    b"Treasure",
+                    b"lucky_box",
+                    b"TreasureBox",
+                    b"RedEnvelop",
+                ]
+                if any(marker in raw for marker in markers):
+                    logger.info(
+                        "🎁 RAW ENVELOPE in @%s (bytes:%d)",
+                        self.username,
+                        len(raw),
+                    )
                     box_info = {
                         "type": "raw_envelope",
-                        "description": "Detected via raw event data",
                         "size": len(raw),
                         "stream_info": self._stream_info,
                     }
                     if self.on_box_detected:
                         await self.on_box_detected(self.username, self._room_id, box_info)
+
         except ImportError:
             pass
 
@@ -212,7 +294,6 @@ class LuckyBoxDetector:
         info["viewer_count"] = room.get("user_count", 0)
         info["share_url"] = room.get("share_url", "")
 
-        # Region: try multiple fields, fallback to language from share_url
         region = (
             room.get("idc_region", "") or owner.get("region", "") or room.get("region", "") or owner.get("country", "")
         )
@@ -232,20 +313,35 @@ class LuckyBoxDetector:
         return info
 
     def _parse_envelope_event(self, event: Any) -> dict[str, Any]:
-        """Extract useful information from an EnvelopeEvent."""
+        """Extract useful info from an EnvelopeEvent (WebcastEnvelopeMessage).
+
+        Proto fields (MessageRedEnvelopInfo):
+          - envelope_id, business_type, envelope_idc
+          - send_user_name, send_user_id, send_user_avatar
+          - diamond_count, people_count, unpack_at
+          - create_time, skin_id
+        """
         info: dict[str, Any] = {"type": "envelope"}
 
-        # Try to extract common fields from the envelope event
-        for attr in ["coins", "diamond_count", "diamonds", "description", "title"]:
-            if hasattr(event, attr):
-                info[attr] = getattr(event, attr)
-
-        # Try nested structures
-        if hasattr(event, "envelope_info"):
-            env_info = event.envelope_info
-            for attr in ["coins", "diamond_count"]:
-                if hasattr(env_info, attr):
-                    info[attr] = getattr(env_info, attr)
+        env = getattr(event, "envelope_info", None)
+        if env is not None:
+            info["diamond_count"] = getattr(env, "diamond_count", 0)
+            info["people_count"] = getattr(env, "people_count", 0)
+            info["send_user_name"] = getattr(env, "send_user_name", "")
+            info["send_user_id"] = getattr(env, "send_user_id", "")
+            info["envelope_id"] = getattr(env, "envelope_id", "")
+            info["create_time"] = getattr(env, "create_time", "")
+        else:
+            for attr in [
+                "coins",
+                "diamond_count",
+                "diamonds",
+                "description",
+                "title",
+            ]:
+                val = getattr(event, attr, None)
+                if val is not None:
+                    info[attr] = val
 
         return info
 
@@ -302,13 +398,12 @@ class MultiStreamDetector:
             while retry_count < max_retries:
                 try:
                     await detector.start()
-                    # start() returned normally (stream ended) — reset retries
                     break
                 except Exception as e:
                     retry_count += 1
                     wait_time = min(30 * retry_count, 120)
                     logger.warning(
-                        "Detector for @%s failed (attempt %d/%d): %s. Retrying in %ds...",
+                        "Detector @%s failed (%d/%d): %s. Retry in %ds.",
                         username,
                         retry_count,
                         max_retries,
@@ -317,7 +412,7 @@ class MultiStreamDetector:
                     )
                     await asyncio.sleep(wait_time)
             else:
-                logger.error("Detector for @%s exceeded max retries. Removing.", username)
+                logger.error("Detector @%s exceeded max retries. Removing.", username)
 
             self._detectors.pop(username, None)
 

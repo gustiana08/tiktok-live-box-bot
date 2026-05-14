@@ -64,36 +64,52 @@ async def notify_lucky_box(
     room_id: int | str,
     box_info: dict[str, Any] | None = None,
 ) -> None:
-    """Send a lucky box notification — short format with account info + region."""
+    """Send a lucky box notification — short format with treasure box details."""
     stream_key = f"{username}:{room_id}"
     if not _can_notify(stream_key):
         logger.debug("Cooldown active for %s, skipping.", stream_key)
         return
 
+    bi = box_info or {}
     live_url = f"https://www.tiktok.com/@{username}/live"
-    si = (box_info or {}).get("stream_info", {})
+    si = bi.get("stream_info", {})
 
     nickname = si.get("nickname", "")
     region = si.get("region", "-")
     viewers = si.get("viewer_count", 0)
     title = si.get("title", "")
+    box_type = bi.get("type", "unknown")
 
     name_display = f"{nickname} (@{username})" if nickname else f"@{username}"
 
     lines = [
-        "🎁 <b>KOTAK KEBERUNTUNGAN!</b>",
+        "🎁 <b>KOTAK HARTA KARUN!</b>",
         "",
         f"👤 {name_display}",
         f"🌍 Region: <b>{region or '-'}</b>",
         f"👀 Viewers: <b>{viewers}</b>",
     ]
 
+    # Add treasure box specific details if available
+    diamonds = bi.get("diamond_count", 0)
+    people = bi.get("people_count", 0)
+    sender = bi.get("send_user_name", "")
+    gift_name = bi.get("gift_name", "")
+
+    if diamonds:
+        lines.append(f"💎 Diamonds: <b>{diamonds}</b>")
+    if people:
+        lines.append(f"👥 Slots: <b>{people}</b>")
+    if sender:
+        lines.append(f"🎗 Sender: {sender}")
+    if gift_name:
+        lines.append(f"📦 Gift: {gift_name}")
     if title:
         lines.append(f"📺 {title}")
 
     lines.append("")
     lines.append(f"🔗 {live_url}")
-    lines.append(f"⏰ {_wib_now()}")
+    lines.append(f"⏰ {_wib_now()} [{box_type}]")
 
     await send_telegram_message("\n".join(lines))
 
