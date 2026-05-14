@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     # TikTok
     tiktok_usernames: str = ""
     scan_interval: int = 30
-    max_concurrent_streams: int = 10
+    max_concurrent_streams: int = 5
 
     # Notification
     notify_on_start: bool = True
