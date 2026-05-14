@@ -11,7 +11,7 @@ from typing import Any
 from bot.config import settings
 from bot.detector import MultiStreamDetector
 from bot.discovery import LiveDiscovery
-from bot.telegram_notifier import notify_bot_status, notify_lucky_box
+from bot.telegram_notifier import notify_bot_status, notify_live_found, notify_lucky_box
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +30,15 @@ def setup_logging() -> None:
 
 
 async def on_box_detected(username: str, room_id: int | str, box_info: dict[str, Any]) -> None:
-    """Callback when a lucky box is detected — sends Telegram notification."""
-    logger.info(
-        "LUCKY BOX DETECTED! Streamer: @%s, Room: %s, Info: %s",
-        username,
-        room_id,
-        box_info,
-    )
+    """Callback when a lucky box is detected."""
+    logger.info("LUCKY BOX! @%s Room:%s", username, room_id)
     await notify_lucky_box(username=username, room_id=room_id, box_info=box_info)
+
+
+async def on_stream_connected(username: str, room_id: int | str, stream_info: dict[str, Any]) -> None:
+    """Callback when successfully connected to a live stream — send info to Telegram."""
+    logger.info("LIVE connected: @%s Room:%s", username, room_id)
+    await notify_live_found(username=username, room_id=room_id, stream_info=stream_info)
 
 
 class Bot:
@@ -47,6 +48,7 @@ class Bot:
         self.discovery = LiveDiscovery()
         self.multi_detector = MultiStreamDetector(
             on_box_detected=on_box_detected,
+            on_stream_connected=on_stream_connected,
             max_concurrent=settings.max_concurrent_streams,
         )
         self._running = False

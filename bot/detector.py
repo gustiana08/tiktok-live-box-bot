@@ -15,25 +15,37 @@ from TikTokLive.events import ConnectEvent, DisconnectEvent
 
 logger = logging.getLogger(__name__)
 
-# Callback type for when a lucky box is detected
+# Callback types
 BoxCallback = Callable[[str, int | str, dict[str, Any]], Coroutine[Any, Any, None]]
+ConnectCallback = Callable[[str, int | str, dict[str, Any]], Coroutine[Any, Any, None]]
 
 
 class LuckyBoxDetector:
     """Monitors a single TikTok Live stream for lucky box events."""
 
-    def __init__(self, username: str, on_box_detected: BoxCallback | None = None) -> None:
+    def __init__(
+        self,
+        username: str,
+        on_box_detected: BoxCallback | None = None,
+        on_stream_connected: ConnectCallback | None = None,
+    ) -> None:
         self.username = username.lstrip("@")
         self.on_box_detected = on_box_detected
+        self.on_stream_connected = on_stream_connected
         self._client: TikTokLiveClient | None = None
         self._running = False
         self._room_id: int | str = 0
+        self._stream_info: dict[str, Any] = {}
 
     async def start(self) -> None:
         """Start monitoring the stream for lucky boxes."""
-        if self._running:
-            logger.warning("Detector for @%s is already running.", self.username)
-            return
+        # Reset state for fresh start / retry
+        self._running = False
+        if self._client:
+            try:
+                await self._client.disconnect()
+            except Exception:
+                pass
 
         self._client = TikTokLiveClient(unique_id=f"@{self.username}")
         self._setup_event_handlers()
@@ -46,6 +58,8 @@ class LuckyBoxDetector:
             self._running = False
             logger.error("Failed to start detector for @%s: %s", self.username, e)
             raise
+        finally:
+            self._running = False
 
     async def stop(self) -> None:
         """Stop monitoring."""
@@ -70,11 +84,16 @@ class LuckyBoxDetector:
         @self._client.on(ConnectEvent)
         async def on_connect(event: ConnectEvent) -> None:
             self._room_id = self._client.room_id if self._client else 0
+            self._stream_info = self._extract_stream_info()
             logger.info(
-                "Connected to @%s (Room ID: %s)",
+                "Connected to @%s (Room ID: %s, Region: %s, Viewers: %s)",
                 event.unique_id,
                 self._room_id,
+                self._stream_info.get("region", "?"),
+                self._stream_info.get("viewer_count", "?"),
             )
+            if self.on_stream_connected:
+                await self.on_stream_connected(self.username, self._room_id, self._stream_info)
 
         @self._client.on(DisconnectEvent)
         async def on_disconnect(event: DisconnectEvent) -> None:
@@ -91,6 +110,7 @@ class LuckyBoxDetector:
             async def on_envelope(event: EnvelopeEvent) -> None:
                 logger.info("EnvelopeEvent (treasure box) detected in @%s!", self.username)
                 box_info = self._parse_envelope_event(event)
+                box_info["stream_info"] = self._stream_info
                 if self.on_box_detected:
                     await self.on_box_detected(self.username, self._room_id, box_info)
         except ImportError:
@@ -145,6 +165,7 @@ class LuckyBoxDetector:
                         "type": "gift_box",
                         "gift_name": gift_name,
                         "gift_id": gift_id,
+                        "stream_info": self._stream_info,
                     }
                     if self.on_box_detected:
                         await self.on_box_detected(self.username, self._room_id, box_info)
@@ -170,11 +191,45 @@ class LuckyBoxDetector:
                         "type": "raw_envelope",
                         "description": "Detected via raw event data",
                         "size": len(raw),
+                        "stream_info": self._stream_info,
                     }
                     if self.on_box_detected:
                         await self.on_box_detected(self.username, self._room_id, box_info)
         except ImportError:
             pass
+
+    def _extract_stream_info(self) -> dict[str, Any]:
+        """Extract account/stream info from the connected TikTokLive client."""
+        info: dict[str, Any] = {"username": self.username}
+        if not self._client or not self._client.room_info:
+            return info
+
+        room = self._client.room_info
+        owner = room.get("owner", {})
+
+        info["nickname"] = owner.get("nickname", "")
+        info["title"] = room.get("title", "")
+        info["viewer_count"] = room.get("user_count", 0)
+        info["share_url"] = room.get("share_url", "")
+
+        # Region: try multiple fields, fallback to language from share_url
+        region = (
+            room.get("idc_region", "") or owner.get("region", "") or room.get("region", "") or owner.get("country", "")
+        )
+        if not region:
+            share_url = room.get("share_url", "")
+            if "language=" in share_url:
+                region = share_url.split("language=")[-1].split("&")[0].upper()
+        info["region"] = region
+
+        follow_info = owner.get("follow_info", {})
+        if isinstance(follow_info, dict):
+            info["follower_count"] = follow_info.get("follower_count", 0)
+
+        info["bio"] = owner.get("bio_description", "")
+        info["display_id"] = owner.get("display_id", "")
+
+        return info
 
     def _parse_envelope_event(self, event: Any) -> dict[str, Any]:
         """Extract useful information from an EnvelopeEvent."""
@@ -198,8 +253,14 @@ class LuckyBoxDetector:
 class MultiStreamDetector:
     """Manages multiple LuckyBoxDetector instances concurrently."""
 
-    def __init__(self, on_box_detected: BoxCallback | None = None, max_concurrent: int = 10) -> None:
+    def __init__(
+        self,
+        on_box_detected: BoxCallback | None = None,
+        on_stream_connected: ConnectCallback | None = None,
+        max_concurrent: int = 10,
+    ) -> None:
         self.on_box_detected = on_box_detected
+        self.on_stream_connected = on_stream_connected
         self.max_concurrent = max_concurrent
         self._detectors: dict[str, LuckyBoxDetector] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
@@ -212,7 +273,11 @@ class MultiStreamDetector:
             logger.debug("@%s is already being monitored.", username)
             return False
 
-        detector = LuckyBoxDetector(username=username, on_box_detected=self.on_box_detected)
+        detector = LuckyBoxDetector(
+            username=username,
+            on_box_detected=self.on_box_detected,
+            on_stream_connected=self.on_stream_connected,
+        )
         self._detectors[username] = detector
 
         task = asyncio.create_task(self._run_detector(username, detector))
@@ -237,7 +302,8 @@ class MultiStreamDetector:
             while retry_count < max_retries:
                 try:
                     await detector.start()
-                    retry_count = 0  # Reset on successful connection
+                    # start() returned normally (stream ended) — reset retries
+                    break
                 except Exception as e:
                     retry_count += 1
                     wait_time = min(30 * retry_count, 120)
@@ -250,8 +316,9 @@ class MultiStreamDetector:
                         wait_time,
                     )
                     await asyncio.sleep(wait_time)
+            else:
+                logger.error("Detector for @%s exceeded max retries. Removing.", username)
 
-            logger.error("Detector for @%s exceeded max retries. Removing.", username)
             self._detectors.pop(username, None)
 
     async def stop_all(self) -> None:
